@@ -167,3 +167,121 @@ Se implementó una función `show_random_samples()` para inspección visual del 
 - Dataset 100% compatible con `Mask R-CNN`
 
 
+## 🧠 Definición del Modelo y Aplicación de Transfer Learning
+
+Para resolver la tarea de segmentación semántica de prendas de vestir, se utilizó el modelo **Mask R-CNN** con backbone **ResNet-50 + Feature Pyramid Network (FPN)**, preentrenado sobre el dataset COCO.
+
+A continuación, se describe cómo se adaptó, entrenó y evaluó el modelo para el contexto específico del proyecto.
+
+---
+
+### 📦 Carga y Adaptación del Modelo Preentrenado
+
+Se cargó el modelo `maskrcnn_resnet50_fpn(pretrained=True)` y se congelaron las capas del backbone para preservar el conocimiento aprendido sobre características visuales generales:
+
+```python
+model = maskrcnn_resnet50_fpn(pretrained=True)
+for name, param in model.backbone.body.named_parameters():
+    param.requires_grad = False  # se pueden descongelar si se desea un fine-tuning completo
+```
+
+Luego, se reemplazaron dos cabezas importantes:
+
+1. **Box Predictor**: se reemplazó para adaptarse al número de clases personalizado (`background`, `upper`, `lower`):
+
+```python
+in_features = model.roi_heads.box_predictor.cls_score.in_features
+model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+```
+
+2. **Mask Predictor**: se reemplazó para predecir máscaras por píxel para las nuevas clases:
+
+```python
+in_mask_features = model.roi_heads.mask_predictor.conv5_mask.in_channels
+model.roi_heads.mask_predictor = MaskRCNNPredictor(in_mask_features, 256, num_classes)
+```
+
+---
+
+### ⚙️ Configuración del Entrenamiento
+
+- **Dispositivo**: se utilizó GPU si estaba disponible (`cuda`) o CPU como fallback.
+- **Épocas**: 5
+- **Batch size**: 4 para entrenamiento, 2 para validación y test
+- **Optimizador**: SGD con momentum y regularización:
+
+```python
+optimizer = SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
+```
+
+---
+
+### 🔁 Ciclo de Entrenamiento por Época
+
+Durante cada época se entrenó el modelo y luego se evaluó en el conjunto de validación.
+
+#### Entrenamiento:
+
+```python
+for images, targets in train_loader:
+    images = [img.to(device) for img in images]
+    targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+    loss_dict = model(images, targets)
+    losses = sum(loss for loss in loss_dict.values())
+
+    optimizer.zero_grad()
+    losses.backward()
+    optimizer.step()
+```
+
+#### Evaluación:
+
+Después de cada época, se evaluó el modelo con IoU y pérdida sobre el conjunto de validación. Se guardó el mejor modelo (`best_val_loss`) con `torch.save()`.
+
+```python
+val_acc, val_loss = evaluate_model(model, val_loader, device)
+```
+
+---
+
+### 📊 Evaluación Final en Test
+
+Después del entrenamiento completo, se cargó el mejor modelo guardado y se evaluó sobre el conjunto de prueba (`test_loader`).
+
+```python
+model.load_state_dict(torch.load(save_path))
+test_acc, test_loss = evaluate_model(model, test_loader, device)
+```
+
+Métrica principal: **IoU promedio por objeto (threshold 0.5)**
+
+---
+
+### 📈 Visualización de Resultados
+
+Se graficaron las siguientes curvas para monitorear el entrenamiento:
+
+- `Train Loss` vs. `Val Loss`
+- `Val Accuracy` (IoU > 0.5) por época
+
+Estas curvas permiten identificar sobreajuste, convergencia y estabilidad.
+
+```python
+plt.plot(train_losses)
+plt.plot(val_losses)
+plt.plot(val_accuracies)
+```
+
+---
+
+### ✅ Resumen del Proceso de Transfer Learning
+
+| Etapa                    | Acción realizada                                  |
+|--------------------------|---------------------------------------------------|
+| Modelo base              | Mask R-CNN (ResNet-50 + FPN)                      |
+| Transfer Learning        | Se usaron pesos preentrenados en COCO            |
+| Adaptación de clases     | 3 clases (background, upper, lower)              |
+| Entrenamiento parcial    | Backbone congelado, cabezas ajustadas            |
+| Evaluación               | IoU y pérdida sobre validación y test            |
+| Guardado de modelo       | Se guarda el modelo con menor `val_loss`         |
